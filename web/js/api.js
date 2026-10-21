@@ -163,7 +163,7 @@ function cacheWrite(key, data) {
   } catch {
     // Место кончилось — выбрасываем старые архивы и пробуем ещё раз.
     try {
-      Object.keys(localStorage).filter((k) => k.startsWith('hist:')).forEach((k) => localStorage.removeItem(k));
+      Object.keys(localStorage).filter((k) => k.startsWith('hd:') || k.startsWith('hist:')).forEach((k) => localStorage.removeItem(k));
       localStorage.setItem(key, JSON.stringify({ savedAt: Date.now() / 1000, data }));
     } catch { /* без кэша тоже работаем */ }
   }
@@ -183,13 +183,59 @@ export async function loadForecast(lat, lon) {
   }
 }
 
-/** Архив за 30 лет, кэш 30 дней. Храним только ежедневные массивы. */
-export async function loadHistory(lat, lon) {
-  const key = `hist:${cacheKey(lat, lon)}`;
+/**
+ * Даты «этого дня» за последние 30 лет (29 февраля в невисокосные годы → 28-е).
+ * Последние ~7 дней в архиве ещё нет — такие даты пропускаем.
+ */
+export function historyDates(month, day, now = new Date()) {
+  const latest = now.getTime() - 7 * 86400 * 1000;
+  const year = now.getUTCFullYear();
+  const dates = [];
+  for (let y = year - HISTORY_YEARS; y <= year; y++) {
+    const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+    const d = month === 2 && day === 29 && !leap ? 28 : day;
+    if (Date.UTC(y, month - 1, d) > latest) continue;
+    dates.push(`${y}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+  }
+  return dates.slice(-HISTORY_YEARS);
+}
+
+/**
+ * Один календарный день за 30 лет. Open-Meteo считает длинный архив как сотни запросов
+ * (30 лет одним запросом ≈ 780 из лимита 600 в минуту), поэтому берём по одному дню
+ * на каждый год — это 30 «дешёвых» запросов. Кэш 30 дней.
+ */
+export async function loadDayHistory(lat, lon, month, day) {
+  const key = `hd:${cacheKey(lat, lon)}:${month}-${day}`;
   const cached = cacheRead(key, 30 * 86400);
   if (cached) return parseHistory(cached);
-  const j = await getJSON(historyURL(lat, lon));
-  const compact = { daily: j.daily };
+  const urls = historyDates(month, day).map((date) => {
+    const url = new URL(historyURL(lat, lon));
+    url.searchParams.set('start_date', date);
+    url.searchParams.set('end_date', date);
+    return url.toString();
+  });
+  // Сервис не любит много одновременных запросов: по 4 за раз, с повтором при отказе.
+  const responses = new Array(urls.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < urls.length) {
+      const i = next++;
+      for (let attempt = 0; ; attempt++) {
+        try { responses[i] = await getJSON(urls[i]); break; } catch (e) {
+          if (attempt >= 3) throw e;
+          await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  // Склеиваем ответы в один ежедневный ряд того же формата, что у архива.
+  const daily = {};
+  for (const r of responses) {
+    for (const [k, v] of Object.entries(r.daily ?? {})) (daily[k] ??= []).push(...v);
+  }
+  const compact = { daily };
   cacheWrite(key, compact);
   return parseHistory(compact);
 }

@@ -39,7 +39,7 @@ function stateFor(page) {
   if (!states.has(page.id)) {
     states.set(page.id, {
       page, snapshot: null, stale: false, error: null, loading: false, loadedAt: 0,
-      alerts: [], headline: null, history: null, historyLoading: false, historyError: null, climate: null,
+      alerts: [], headline: null, archive: new Map(), climate: null,
       lat: page.lat ?? null, lon: page.lon ?? null, title: null, subtitle: null, locationDenied: false,
       countStart: null, countedFor: null, el: null, vane: null, tempEl: null,
     });
@@ -95,7 +95,7 @@ function render(st) {
   if (s) {
     if (st.stale) html += `<div class="stale">📡 Нет связи · данные от ${L.Fmt.time(s.fetchedAt, -new Date().getTimezoneOffset() * 60)}</div>`;
     html += heroWeather(s);
-  } else if (st.loading) {
+  } else if (st.loading || (!st.error && !st.locationDenied)) {
     html += '<div class="loading"><div class="spinner"></div>Загружаю погоду…</div>';
   } else {
     html += `<div class="problem">
@@ -206,10 +206,10 @@ function sections(st) {
     hist = `${cl.averageMax != null ? `<div class="headline" style="font-size:17px">Обычно днём ${T(cl.averageMax)}, ночью ${T(cl.averageMin)}</div>` : ''}
       <div class="note">🔥 ${T(cl.recordHigh.value)} в ${cl.recordHigh.year} &nbsp; 🥶 ${T(cl.recordLow.value)} в ${cl.recordLow.year}</div>
       <div class="link"><span>Все ${cl.years.length} лет наблюдений</span><span>›</span></div>`;
-  } else if (st.historyLoading) {
+  } else if (todayArchive(st)?.loading) {
     hist = '<div class="note">⏳ Загружаю архив за 30 лет…</div>';
   } else {
-    hist = `<div class="note">${esc(st.historyError ?? 'Посмотреть, какой была погода в этот день за 30 лет')}</div>`;
+    hist = `<div class="note">${esc(todayArchive(st)?.error ?? 'Посмотреть, какой была погода в этот день за 30 лет')}</div>`;
   }
   html += `<button class="card" data-action="history"><div class="card-title">🕰️ Этот день в истории</div>${hist}</button>`;
 
@@ -316,29 +316,47 @@ async function load(st, force = false) {
     syncRefreshButton();
     if (st === activeState()) activate(st);
   }
-  loadHistory(st);
+  if (st.snapshot) { const [m, d] = todayMD(st); loadHistory(st, m, d); }
 }
 
-async function loadHistory(st) {
-  if (st.history || st.historyLoading || st.lat == null) return;
-  st.historyLoading = true;
-  st.historyError = null;
+/** Месяц и число «сегодня» в часовом поясе точки. */
+function todayMD(st) {
+  const d = L.localDate(now(), st.snapshot?.offset ?? 0);
+  return [d.getUTCMonth() + 1, d.getUTCDate()];
+}
+
+function todayArchive(st) {
+  const [m, d] = todayMD(st);
+  return st.archive.get(`${m}-${d}`);
+}
+
+/** Архив одного календарного дня за 30 лет; загружается по требованию и кэшируется. */
+async function loadHistory(st, month, day) {
+  if (st.lat == null) return;
+  const key = `${month}-${day}`;
+  if (st.lastArchiveCoords !== API.cacheKey(st.lat, st.lon)) { st.archive.clear(); st.lastArchiveCoords = API.cacheKey(st.lat, st.lon); }
+  const entry = st.archive.get(key) ?? { days: null, loading: false, error: null };
+  st.archive.set(key, entry);
+  if (entry.days || entry.loading) return;
+  entry.loading = true;
+  entry.error = null;
   try {
-    st.history = await API.loadHistory(st.lat, st.lon);
+    entry.days = await API.loadDayHistory(st.lat, st.lon, month, day);
     updateClimate(st);
   } catch (e) {
-    st.historyError = `Архив не загрузился: ${e.message}`;
+    entry.error = `Архив не загрузился: ${e.message}`;
   } finally {
-    st.historyLoading = false;
+    entry.loading = false;
     if (st.snapshot) render(st);
     if (historyOpenFor === st) renderHistory(st);
   }
 }
 
 function updateClimate(st) {
-  if (!st.history || !st.snapshot) return;
-  const d = L.localDate(now(), st.snapshot.offset);
-  st.climate = L.climate(d.getUTCMonth() + 1, d.getUTCDate(), st.history);
+  const entry = st.snapshot && todayArchive(st);
+  if (!entry?.days) return;
+  const [m, d] = todayMD(st);
+  st.climate = L.climate(m, d, entry.days);
 }
 
 // ---------- Активная страница ----------
@@ -442,7 +460,7 @@ function maybeSpotlight(st) {
     spotEl.classList.remove('leaving');
     spotEl.hidden = false;
     badgeEl.hidden = true;
-    navigator.vibrate?.([200, 100, 200]);
+    if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.([200, 100, 200]);
     clearTimeout(spotTimer);
     spotTimer = setTimeout(collapseSpotlight, 6000);
   }, 1200); // пусть сначала «досчитает» температура
@@ -577,21 +595,23 @@ function openHistory(st) {
   openSheet(st.title ?? st.page.name, `<div class="date-row"><span>День</span><input type="date" id="histDate" value="${iso}"></div><div id="histContent"></div>`);
   $('#histDate').addEventListener('change', () => renderHistory(st));
   renderHistory(st);
-  loadHistory(st);
 }
 
 function renderHistory(st) {
   const el = $('#histContent');
   if (!el) return;
-  if (!st.history) {
-    el.innerHTML = st.historyLoading || !st.historyError
-      ? '<div class="loading" style="text-align:center;margin-top:40px"><div class="spinner"></div>Загружаю архив за 30 лет…</div>'
-      : `<p>${esc(st.historyError)}</p>`;
-    return;
-  }
   const value = $('#histDate').value || new Date().toISOString().slice(0, 10);
   const [year, month, day] = value.split('-').map(Number);
-  const c = L.climate(month, day, st.history);
+  const entry = st.archive.get(`${month}-${day}`);
+  if (!entry?.days) {
+    el.innerHTML = entry?.error
+      ? `<p>${esc(entry.error)}</p><button class="spot-ok" style="background:#0a84ff" id="histRetry">Повторить</button>`
+      : '<div class="loading" style="text-align:center;margin-top:40px"><div class="spinner"></div>Загружаю архив за 30 лет…</div>';
+    $('#histRetry')?.addEventListener('click', () => { st.archive.delete(`${month}-${day}`); renderHistory(st); });
+    if (!entry?.loading && !entry?.error) loadHistory(st, month, day);
+    return;
+  }
+  const c = L.climate(month, day, entry.days);
   if (!c.years.length) { el.innerHTML = '<p>Нет данных за этот день.</p>'; return; }
   const s = st.snapshot;
   const f = s?.daily.find((x) => { const d = L.localDate(x.date, s.offset); return d.getUTCFullYear() === year && d.getUTCMonth() + 1 === month && d.getUTCDate() === day; });
