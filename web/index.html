@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Погодка</title>
+<meta name="description" content="Погода с живой анимацией, прогнозом на неделю, предупреждениями и архивом за 30 лет.">
+<meta name="theme-color" content="#0b1530">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Погодка">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="sky" aria-hidden="true"></canvas>
+<div class="top-fade" aria-hidden="true"></div>
+
+<main id="pages" class="pages" aria-live="polite"></main>
+<nav id="dots" class="dots" aria-label="Страницы"></nav>
+
+<div class="topbar">
+  <button id="placesBtn" class="round-btn" aria-label="Мои места">☰</button>
+  <button id="refreshBtn" class="round-btn" aria-label="Обновить">↻</button>
+  <span class="spacer"></span>
+  <button id="alertBadge" class="alert-badge" hidden aria-label="Предупреждения о погоде"></button>
+</div>
+
+<div id="spotlight" class="spotlight" hidden role="alertdialog" aria-modal="true"></div>
+<div id="sheet" class="sheet" hidden role="dialog" aria-modal="true">
+  <div class="sheet-panel">
+    <header class="sheet-head">
+      <h2 id="sheetTitle"></h2>
+      <button id="sheetClose" class="text-btn">Готово</button>
+    </header>
+    <div id="sheetBody" class="sheet-body"></div>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
