@@ -1,5 +1,5 @@
 // Офлайн-кэш оболочки приложения. Данные погоды кэшируются отдельно в localStorage.
-const VERSION = 'pogodka-v2';
+const VERSION = 'pogodka-v3';
 const SHELL = [
   './', './index.html', './css/style.css', './js/app.js', './js/logic.js', './js/api.js', './js/scene.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',

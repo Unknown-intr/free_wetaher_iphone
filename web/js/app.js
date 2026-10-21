@@ -14,6 +14,7 @@ const REDUCE_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const DEMO = new URLSearchParams(location.search).get('demo');
 
 const scene = new Scene($('#sky'));
+if (DEMO) window.__scene = scene; // счётчики кадров для проверки в демо-режиме
 const pagesEl = $('#pages');
 const badgeEl = $('#alertBadge');
 const spotEl = $('#spotlight');
@@ -391,10 +392,29 @@ window.addEventListener('resize', () => { pagesEl.scrollLeft = activeIndex * pag
 
 // ---------- Анимационный цикл ----------
 
+// Экономия батареи: чем меньше сцену видно и чем дольше её не трогают, тем реже она рисуется.
+let lastInteraction = performance.now();
+const touched = () => { lastInteraction = performance.now(); };
+for (const ev of ['pointerdown', 'touchstart', 'wheel', 'keydown']) window.addEventListener(ev, touched, { passive: true });
+pagesEl.addEventListener('scroll', touched, { passive: true, capture: true });
+
+function sceneMode(st, t) {
+  if (document.hidden || !$('#sheet').hidden) return 'paused';
+  if (!spotEl.hidden) return 'covered';
+  // Прокрутили к карточкам — сцену почти целиком закрывают полупрозрачные карточки.
+  if (st?.el && st.el.scrollTop > window.innerHeight * 0.55) return 'covered';
+  if (t - lastInteraction > 60000) return 'quiet';
+  return 'normal';
+}
+
+if (DEMO) window.__sceneMode = () => sceneMode(activeState(), performance.now());
+
 function loop(t) {
-  scene.frame(t);
   const st = activeState();
-  if (st?.vane && !REDUCE_MOTION) st.vane.frame(t);
+  const mode = sceneMode(st, t);
+  scene.setMode(mode);
+  scene.frame(t);
+  if (st?.vane && !REDUCE_MOTION && (mode === 'normal' || mode === 'quiet')) st.vane.frame(t);
   if (st?.countStart != null && st.tempEl && st.snapshot) {
     const target = st.snapshot.current.temp;
     const p = Math.min(1, (t - st.countStart) / 2600);

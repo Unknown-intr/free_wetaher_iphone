@@ -18,6 +18,22 @@ function seeded(seed) {
 }
 
 const BG_SCALE = 0.5;
+
+/** Холст для заранее нарисованной картинки (облако, дерево, боке). */
+function makeSprite(wCss, hCss, k, draw) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.ceil(wCss * k)); c.height = Math.max(1, Math.ceil(hCss * k));
+  const ctx = c.getContext('2d');
+  ctx.scale(k, k);
+  draw(ctx);
+  return c;
+}
+
+/**
+ * Частота кадров [средний план, размытый фон] по режимам. Размытый слой — самый дорогой:
+ * после каждой его перерисовки телефон заново размывает и его, и полупрозрачные карточки поверх.
+ */
+const RATES = { normal: [30, 12], quiet: [10, 4], covered: [4, 2], paused: [0, 0] };
 const TAU = Math.PI * 2;
 
 const overcastOf = (m) => Math.min(0.85, m.cloudiness * 0.55 + (m.precipitation !== 'none' ? 0.2 : 0) + (m.isThunderstorm ? 0.15 : 0));
@@ -71,9 +87,29 @@ export class Scene {
     this.flash = 0; this.bolt = []; this.nextFlash = 1.5;
     this.skyTop = null; this.skyBottom = null;
     this.phase = moonPhase();
+    this.mode = 'normal';
+    this.lastBg = -Infinity;
+    this.counts = { fx: 0, bg: 0 };
+    this.treeSprite = null;
+    // Мягкий круг для расфокусированных снежинок у «объектива».
+    this.bokeh = makeSprite(64, 64, 1, (ctx) => {
+      const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.5, 'rgba(255,255,255,0.6)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
+    });
   }
 
-  setMood(m) { this.mood = m ?? PLACEHOLDER_MOOD; this.phase = moonPhase(); }
+  setMood(m) {
+    this.mood = m ?? PLACEHOLDER_MOOD;
+    this.phase = moonPhase();
+    this.lastBg = -Infinity; // перерисовать фон сразу
+  }
+
+  /** normal — обычная плавность, quiet — давно не трогали, covered — сцену закрыли карточки, paused — не рисовать. */
+  setMode(mode) { this.mode = RATES[mode] ? mode : 'normal'; }
+
+  stats() { return { ...this.counts }; }
+  resetStats() { this.counts = { fx: 0, bg: 0 }; }
 
   get groundY() { return this.h * 0.86; }
 
@@ -104,6 +140,8 @@ export class Scene {
     set('bg', BG_SCALE); set('fx', dpr); set('glass', dpr);
     this.stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: rnd(0, 0.6) ** 1.3, size: rnd(0.4, 1.5), phase: rnd(0, TAU), speed: rnd(0.5, 2.5) }));
     this.buildLandscape();
+    this.lastBg = -Infinity;
+    this.treeSprite = null;
     this.precip = []; this.splashes = []; this.ambient = []; this.glass = []; this.clouds = [];
   }
 
@@ -163,9 +201,13 @@ export class Scene {
 
   frame(nowMs) {
     this.resize();
-    const dt = this.last == null ? 0 : Math.min(Math.max((nowMs - this.last) / 1000, 0), 0.05);
+    const [fxFps, bgFps] = RATES[this.mode];
+    if (!fxFps) { this.last = null; return; }
+    if (this.last != null && nowMs - this.last < 1000 / fxFps - 2) return;
+    const dt = this.last == null ? 0 : Math.min(Math.max((nowMs - this.last) / 1000, 0), 0.25);
     this.last = nowMs;
     this.t += dt;
+    this.counts.fx++;
     const m = this.mood;
     const gustiness = Math.max(0, m.windGusts - m.windSpeed);
     const pulse = Math.max(0, Math.sin(this.t * 0.8) * Math.sin(this.t * 2.3 + 1.3));
@@ -179,10 +221,15 @@ export class Scene {
     this.updateClouds(dt); this.updatePrecip(dt); this.updateAmbient(dt); this.updateGlass(dt); this.updateLightning(dt);
 
     const { bg, fx, glass } = this.x;
+    // Размытый фон двигается медленно — ему хватает 12 кадров в секунду.
+    if (nowMs - this.lastBg >= 1000 / bgFps - 2) {
+      this.lastBg = nowMs;
+      this.counts.bg++;
+      this.drawSky(bg); this.drawSun(bg); this.drawClouds(bg); this.drawHills(bg); this.drawTree(bg);
+    }
     fx.clearRect(0, 0, this.w, this.h);
     glass.clearRect(0, 0, this.w, this.h);
-    this.drawSky(bg); this.drawSun(bg); this.drawClouds(bg); this.drawHills(bg); this.drawTree(bg); this.drawNearParticles(bg);
-    this.drawStars(fx); this.drawMoon(fx); this.drawAmbient(fx); this.drawPrecip(fx); this.drawSplashes(fx); this.drawFog(fx); this.drawBolt(fx);
+    this.drawStars(fx); this.drawMoon(fx); this.drawAmbient(fx); this.drawNearParticles(fx); this.drawPrecip(fx); this.drawSplashes(fx); this.drawFog(fx); this.drawBolt(fx);
     this.drawGlass(glass); this.drawFlash(glass);
   }
 
@@ -438,23 +485,39 @@ export class Scene {
       ctx.fillRect(0, 0, this.w, this.h * 0.55);
     }
 
-    // Каждый клуб — мягкий радиальный градиент: снизу тень, сверху подсветка, края растворяются.
+    // Каждое облако рисуется один раз в картинку и дальше только сдвигается.
+    const key = `${css(shadow)}|${css(base)}|${css(lit)}|${a}`;
     for (const c of this.clouds) {
+      if (c.key !== key) { c.key = key; c.sprite = this.renderCloud(c, shadow, base, lit, a); }
+      ctx.drawImage(c.sprite.canvas, c.x + c.sprite.minX, c.y + c.sprite.minY, c.sprite.w, c.sprite.h);
+    }
+  }
+
+  /** Клубы — мягкие радиальные градиенты: снизу тень, сверху подсветка, края растворяются. */
+  renderCloud(c, shadow, base, lit, a) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [dx, dy, r] of c.puffs) {
+      minX = Math.min(minX, dx - r * 1.05); maxX = Math.max(maxX, dx + r * 1.05);
+      minY = Math.min(minY, dy - r); maxY = Math.max(maxY, dy + r * 1.3);
+    }
+    const w = maxX - minX, h = maxY - minY;
+    const canvas = makeSprite(w, h, BG_SCALE, (ctx) => {
+      ctx.translate(-minX, -minY);
       for (const [dx, dy, r] of c.puffs) {
-        const x = c.x + dx, y = c.y + dy + r * 0.22;
-        const g = ctx.createRadialGradient(x, y, 0, x, y, r * 1.05);
+        const y = dy + r * 0.22;
+        const g = ctx.createRadialGradient(dx, y, 0, dx, y, r * 1.05);
         g.addColorStop(0, css(shadow, a)); g.addColorStop(0.65, css(shadow, a * 0.75)); g.addColorStop(1, css(shadow, 0));
         ctx.fillStyle = g;
-        ctx.fillRect(x - r * 1.05, y - r * 1.05, r * 2.1, r * 2.1);
+        ctx.fillRect(dx - r * 1.05, y - r * 1.05, r * 2.1, r * 2.1);
       }
       for (const [dx, dy, r] of c.puffs) {
-        const x = c.x + dx, y = c.y + dy;
-        const g = ctx.createRadialGradient(x, y - r * 0.35, 0, x, y, r);
+        const g = ctx.createRadialGradient(dx, dy - r * 0.35, 0, dx, dy, r);
         g.addColorStop(0, css(lit, a)); g.addColorStop(0.45, css(base, a * 0.9)); g.addColorStop(1, css(base, 0));
         ctx.fillStyle = g;
-        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+        ctx.fillRect(dx - r, dy - r, r * 2, r * 2);
       }
-    }
+    });
+    return { canvas, minX, minY, w, h };
   }
 
   drawHills(ctx) {
@@ -493,63 +556,77 @@ export class Scene {
   drawTree(ctx) {
     const T = this.tree;
     const k = this.light;
+    const key = `${this.mood.season}|${this.mood.snowOnGround}|${Math.round(k * 40)}`;
+    if (!this.treeSprite || this.treeSprite.key !== key) this.treeSprite = { key, ...this.renderTree(k) };
+    const spr = this.treeSprite;
     const dir = this.drift >= 0 ? 1 : -1;
     const sway = (Math.min(0.16, this.wind * 0.009) + Math.sin(this.t * 1.6) * this.wind * 0.003) * dir;
-    const wf = this.windFactor;
-    const t = this.t;
-    // Ветер гнёт дерево тем сильнее, чем выше точка.
-    const bend = (x, y) => {
-      const hgt = Math.max(0, -y / T.th);
-      return x + sway * T.th * hgt * hgt * 0.7 + Math.sin(t * 2.3 + y * 0.05) * wf * hgt * 4;
-    };
+    // Ветер гнёт дерево: сдвиг тем больше, чем выше точка (дерево нарисовано заранее, гнём сдвигом).
     ctx.save();
     ctx.translate(T.x, T.y);
-    ctx.lineCap = 'round';
-    ctx.strokeStyle = css(scale([0.27, 0.20, 0.15], k));
-    for (const s of T.segs) {
-      ctx.lineWidth = s.wd;
-      ctx.beginPath(); ctx.moveTo(bend(s.x1, s.y1), s.y1); ctx.lineTo(bend(s.x2, s.y2), s.y2); ctx.stroke();
-    }
-    const season = this.mood.season;
-    if (season === 'winter') {
-      if (this.mood.snowOnGround) {
-        ctx.strokeStyle = `rgba(245,248,255,${0.85 * Math.max(k, 0.45)})`;
-        for (const s of T.segs) {
-          if (s.wd < 2) continue;
-          ctx.lineWidth = s.wd * 0.45;
-          ctx.beginPath(); ctx.moveTo(bend(s.x1, s.y1), s.y1 - s.wd * 0.4); ctx.lineTo(bend(s.x2, s.y2), s.y2 - s.wd * 0.4); ctx.stroke();
-        }
-      }
-      ctx.restore();
-      return;
-    }
-    for (const b of T.blobs) {
-      if (season === 'autumn' && b.pick > 0.62) continue; // листва уже облетает
-      const hgt = Math.max(0, -b.y / T.th);
-      const light = (0.72 + 0.4 * hgt) * k;
-      let col;
-      if (season === 'autumn') col = LEAF_COLORS[b.tint];
-      else if (season === 'spring') col = b.pick < 0.28 ? [0.98, 0.80, 0.86] : mix([0.33, 0.55, 0.22], [0.56, 0.76, 0.36], b.shade);
-      else col = mix([0.13, 0.30, 0.11], [0.32, 0.52, 0.20], b.shade);
-      ctx.fillStyle = css(scale(col, light), 0.92);
-      ctx.beginPath(); ctx.arc(bend(b.x, b.y), b.y, b.r, 0, TAU); ctx.fill();
-    }
+    ctx.transform(1, 0, -sway * 0.6, 1, 0, 0);
+    ctx.drawImage(spr.canvas, spr.minX, spr.minY, spr.w, spr.h);
     ctx.restore();
   }
 
-  /** Ближние частицы проходят «перед объективом» — на размытом слое они становятся боке. */
+  renderTree(k) {
+    const T = this.tree;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity;
+    for (const s of T.segs) { minX = Math.min(minX, s.x1, s.x2); maxX = Math.max(maxX, s.x1, s.x2); minY = Math.min(minY, s.y2); }
+    for (const b of T.blobs) { minX = Math.min(minX, b.x - b.r); maxX = Math.max(maxX, b.x + b.r); minY = Math.min(minY, b.y - b.r); }
+    minX -= 12; maxX += 12; minY -= 12;
+    const w = maxX - minX, h = -minY + 8;
+    const season = this.mood.season;
+    const canvas = makeSprite(w, h, BG_SCALE, (ctx) => {
+      ctx.translate(-minX, -minY);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = css(scale([0.27, 0.20, 0.15], k));
+      for (const s of T.segs) {
+        ctx.lineWidth = s.wd;
+        ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+      }
+      if (season === 'winter') {
+        if (this.mood.snowOnGround) {
+          ctx.strokeStyle = `rgba(245,248,255,${0.85 * Math.max(k, 0.45)})`;
+          for (const s of T.segs) {
+            if (s.wd < 2) continue;
+            ctx.lineWidth = s.wd * 0.45;
+            ctx.beginPath(); ctx.moveTo(s.x1, s.y1 - s.wd * 0.4); ctx.lineTo(s.x2, s.y2 - s.wd * 0.4); ctx.stroke();
+          }
+        }
+        return;
+      }
+      for (const b of T.blobs) {
+        if (season === 'autumn' && b.pick > 0.62) continue; // листва уже облетает
+        const hgt = Math.max(0, -b.y / T.th);
+        const light = (0.72 + 0.4 * hgt) * k;
+        let col;
+        if (season === 'autumn') col = LEAF_COLORS[b.tint];
+        else if (season === 'spring') col = b.pick < 0.28 ? [0.98, 0.80, 0.86] : mix([0.33, 0.55, 0.22], [0.56, 0.76, 0.36], b.shade);
+        else col = mix([0.13, 0.30, 0.11], [0.32, 0.52, 0.20], b.shade);
+        ctx.fillStyle = css(scale(col, light), 0.92);
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+      }
+    });
+    return { canvas, minX, minY, w, h };
+  }
+
+  /** Ближние частицы проходят «перед объективом» — крупные, мягкие и полупрозрачные (боке). */
   drawNearParticles(ctx) {
-    const snowBokeh = new Path2D();
     const rainBokeh = new Path2D();
+    ctx.globalAlpha = 0.5;
     for (const p of this.precip) {
       if (p.z < 0.9) continue;
-      if (p.isSnow) { snowBokeh.moveTo(p.x + p.size * 2.6, p.y); snowBokeh.arc(p.x, p.y, p.size * 2.6, 0, TAU); }
-      else if (this.mood.precipitation !== 'hail') { rainBokeh.moveTo(p.x, p.y); rainBokeh.lineTo(p.x - p.vx * 0.05, p.y - p.vy * 0.05); }
+      if (p.isSnow) {
+        const R = p.size * 3.2;
+        ctx.drawImage(this.bokeh, p.x - R, p.y - R, R * 2, R * 2);
+      } else if (this.mood.precipitation !== 'hail') {
+        rainBokeh.moveTo(p.x, p.y); rainBokeh.lineTo(p.x - p.vx * 0.05, p.y - p.vy * 0.05);
+      }
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
-    ctx.fill(snowBokeh);
-    ctx.strokeStyle = 'rgba(220,232,255,0.35)';
-    ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = 'rgba(220,232,255,0.16)';
+    ctx.lineWidth = 2.6; ctx.lineCap = 'round';
     ctx.stroke(rainBokeh);
   }
 
@@ -764,7 +841,8 @@ export class Vane {
   set(direction, speed, gusts) { this.direction = direction; this.speed = speed; this.gusts = gusts; }
 
   frame(nowMs) {
-    const dt = this.last == null ? 0 : Math.min((nowMs - this.last) / 1000, 0.05);
+    if (this.last != null && nowMs - this.last < 1000 / 30 - 2) return; // 30 кадров достаточно
+    const dt = this.last == null ? 0 : Math.min((nowMs - this.last) / 1000, 0.1);
     this.last = nowMs; this.t += dt;
     const t = this.t;
     const rps = Math.min(0.15 + this.speed * 0.32, 7);
