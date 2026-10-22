@@ -123,8 +123,8 @@ export class Scene {
   get windFactor() { return Math.min(1, this.wind / 12); }
 
   get light() {
-    const base = { morning: 0.85, day: 1, evening: 0.66, night: 0.28 }[this.mood.timeOfDay];
-    return base * (1 - overcastOf(this.mood) * 0.3);
+    const base = { morning: 0.93, day: 1.05, evening: 0.8, night: 0.45 }[this.mood.timeOfDay];
+    return base * (1 - overcastOf(this.mood) * 0.2);
   }
 
   resize() {
@@ -274,7 +274,7 @@ export class Scene {
     const p = { x: rnd(-0.4, 1.4) * this.w, y: 0, vx: 0, vy: 0, z, size: 1, phase: rnd(0, TAU), bounces: 0 };
     p.isSnow = kind === 'snow' || (kind === 'sleet' && Math.random() < 0.5);
     const depth = 0.5 + z * 0.7;
-    if (p.isSnow) { p.vy = rnd(40, 90) * depth; p.size = rnd(1, 2.4) * (0.5 + z * 1.4); }
+    if (p.isSnow) { p.vy = rnd(40, 90) * depth; p.size = rnd(1.2, 2.6) * (0.55 + z * 1.4); }
     else if (kind === 'hail') { p.vy = rnd(600, 850) * depth; p.size = rnd(1.8, 3.8) * (0.6 + z * 0.8); }
     else if (kind === 'drizzle') { p.vy = rnd(380, 520) * depth; p.size = 0.6; }
     else { p.vy = rnd(950, 1300) * depth; p.size = 1; }
@@ -336,9 +336,9 @@ export class Scene {
     else if (Math.abs(d) > 40) { p.x = d > 0 ? -20 : this.w + 20; p.y = rnd(0, this.groundY * 0.95); }
     else { p.x = rnd(0, this.w); p.y = kind === 'seed' ? this.groundY + 10 : -20; }
     const depth = 0.45 + p.z * 0.8;
-    if (kind === 'leaf') { p.size = rnd(5, 9) * depth; p.vy = rnd(35, 70) * depth; p.spin = rnd(-3, 3); }
-    else if (kind === 'petal') { p.size = rnd(2.2, 4) * depth; p.vy = rnd(20, 45) * depth; p.spin = rnd(-4, 4); }
-    else if (kind === 'seed') { p.size = rnd(4, 7) * depth; p.vy = rnd(-25, -5); }
+    if (kind === 'leaf') { p.size = rnd(6.5, 11) * depth; p.vy = rnd(35, 70) * depth; p.spin = rnd(-3, 3); }
+    else if (kind === 'petal') { p.size = rnd(3, 5) * depth; p.vy = rnd(20, 45) * depth; p.spin = rnd(-4, 4); }
+    else if (kind === 'seed') { p.size = rnd(5.5, 9) * depth; p.vy = rnd(-25, -5); }
     else { p.size = rnd(0.6, 1.8) * depth; p.vy = rnd(6, 20); }
     return p;
   }
@@ -633,13 +633,23 @@ export class Scene {
   // ---------- Средний план (fx) ----------
 
   drawStars(ctx) {
-    if (this.mood.timeOfDay !== 'night') return;
-    const vis = 1 - this.mood.cloudiness;
-    if (vis <= 0.05) return;
+    const m = this.mood;
+    const light = m.starLight ?? (m.timeOfDay === 'night' ? 1 : 0);
+    // Сквозь разрывы облаков звёзды видны и при переменной облачности; в осадки — почти нет.
+    const vis = light * Math.max(0, 1 - m.cloudiness * 0.7) * (m.precipitation === 'none' ? 1 : 0.25);
+    if (vis <= 0.03) return;
     for (const s of this.stars) {
-      const a = vis * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.t * s.speed + s.phase)));
-      ctx.fillStyle = `rgba(235,240,255,${a})`;
-      ctx.beginPath(); ctx.arc(s.x * this.w, s.y * this.groundY, s.size / 2, 0, TAU); ctx.fill();
+      const tw = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.t * s.speed + s.phase));
+      const a = Math.min(1, vis * tw);
+      const x = s.x * this.w, y = s.y * this.groundY, r = s.size * 0.7;
+      if (s.size > 1.3) {
+        // Яркие звёзды — с мягким ореолом.
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r * 4);
+        g.addColorStop(0, `rgba(220,230,255,${a * 0.5})`); g.addColorStop(1, 'rgba(220,230,255,0)');
+        ctx.fillStyle = g; ctx.fillRect(x - r * 4, y - r * 4, r * 8, r * 8);
+      }
+      ctx.fillStyle = `rgba(245,248,255,${a})`;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
     }
   }
 
@@ -679,9 +689,9 @@ export class Scene {
 
   drawAmbient(ctx) {
     const kind = this.ambientKind;
-    const k = Math.max(this.light, 0.4);
+    const k = Math.max(this.light, 0.6);
     for (const p of this.ambient) {
-      const alpha = 0.55 + p.z * 0.45;
+      const alpha = 0.8 + p.z * 0.2;
       if (kind === 'sparkle') {
         ctx.fillStyle = `rgba(255,255,255,${(0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.t * 3 + p.phase))) * 0.75 * alpha})`;
         ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, TAU); ctx.fill();
@@ -704,7 +714,7 @@ export class Scene {
         ctx.fillStyle = css(scale(p.tint % 2 === 0 ? [1, 0.82, 0.88] : [1, 0.95, 0.96], k), 0.9);
         ctx.beginPath(); ctx.ellipse(0, 0, s, s * 0.55, 0, 0, TAU); ctx.fill();
       } else {
-        ctx.strokeStyle = `rgba(255,255,255,${0.7 * k + 0.15})`; ctx.lineWidth = 0.4;
+        ctx.strokeStyle = `rgba(255,255,255,${0.75 * k + 0.25})`; ctx.lineWidth = 0.7;
         ctx.beginPath();
         for (let j = 0; j < 13; j++) { const a = -Math.PI / 2 + (j - 6) * 0.22; ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * s, Math.sin(a) * s); }
         ctx.moveTo(0, 0); ctx.lineTo(0, s * 1.3);
@@ -736,10 +746,10 @@ export class Scene {
       }
     }
     ctx.lineCap = 'round';
-    const rainAlpha = night ? [0.10, 0.17, 0.26] : [0.16, 0.26, 0.40];
-    const widths = drizzle ? [0.4, 0.6, 0.8] : [0.5, 0.8, 1.2];
+    const rainAlpha = night ? [0.22, 0.34, 0.5] : [0.3, 0.45, 0.65];
+    const widths = drizzle ? [0.5, 0.8, 1.1] : [0.7, 1.1, 1.6];
     rain.forEach((path, i) => { ctx.strokeStyle = `rgba(215,228,245,${rainAlpha[i]})`; ctx.lineWidth = widths[i]; ctx.stroke(path); });
-    [0.55, 0.75, 0.92].forEach((a, i) => { ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.fill(snow[i]); });
+    [0.8, 0.92, 1].forEach((a, i) => { ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.fill(snow[i]); });
     if (hail) {
       ctx.fillStyle = 'rgb(232,240,250)'; ctx.fill(stones);
       ctx.strokeStyle = 'rgba(140,170,205,0.8)'; ctx.lineWidth = 0.5; ctx.stroke(stones);

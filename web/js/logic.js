@@ -161,10 +161,24 @@ export function dayOf(s, t) {
   return s.daily.find((d) => dayKey(d.date, s.offset) === k);
 }
 
+/**
+ * Насколько видны звёзды, 0…1: проявляются за ~40 минут после заката и гаснут к рассвету.
+ * Без восхода/заката (полярные день и ночь) — по времени суток.
+ */
+export function starLight(t, sunrise, sunset, tod) {
+  const FADE = 40 * 60;
+  if (sunrise && sunset && sunset > sunrise) {
+    if (t >= sunset) return Math.min(1, (t - sunset) / FADE);
+    if (t <= sunrise) return Math.min(1, (sunrise - t) / FADE);
+    return 0;
+  }
+  return tod === 'night' ? 1 : 0;
+}
+
 export const PLACEHOLDER_MOOD = {
   timeOfDay: 'day', season: 'summer', precipitation: 'none', precipitationIntensity: 0, wind: 1,
   windSpeed: 3, windGusts: 5, windDirection: 270, cloudiness: 0.3, isThunderstorm: false, isFog: false,
-  snowOnGround: false, temperature: 18,
+  snowOnGround: false, temperature: 18, starLight: 0,
 };
 
 export function makeMood(s, now = Date.now() / 1000) {
@@ -176,8 +190,10 @@ export function makeMood(s, now = Date.now() / 1000) {
   let intensity = Math.max(cond.intensity, Math.min(1, c.precip / 4));
   intensity = kind !== 'none' ? Math.max(intensity, 0.25) : 0;
   const sea = season(now, s.lat, s.offset);
+  const tod = timeOfDay(now, d?.sunrise, d?.sunset, s.offset);
   return {
-    timeOfDay: timeOfDay(now, d?.sunrise, d?.sunset, s.offset),
+    timeOfDay: tod,
+    starLight: starLight(now, d?.sunrise, d?.sunset, tod),
     season: sea,
     precipitation: kind,
     precipitationIntensity: intensity,
